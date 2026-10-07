@@ -1,0 +1,110 @@
+# Default Configuration for AI-Assisted Leukemia Screening Pipeline (C-NMC 2019)
+
+# Global Reproducibility & Seeds
+project_name: "leukemia-screening-cnmc"
+seed: 42
+seeds: [42, 123, 456]
+
+# Data Configuration
+data:
+  raw_dir: "data/raw"
+  processed_dir: "data/processed"
+  splits_file: "data/splits.csv"
+  img_size: 224
+  channels: 3
+  mean: [0.485, 0.456, 0.406]
+  std: [0.229, 0.224, 0.225]
+  stain_normalization: "none"  # options: none, reinhard, macenko
+  held_out_test_subjects: 15
+  num_folds: 5
+  class_names: ["HEM", "ALL"]  # 0: Normal (HEM), 1: Malignant (ALL)
+
+# Augmentation Parameters (Morphology-preserving)
+augmentation:
+  horizontal_flip_prob: 0.5
+  vertical_flip_prob: 0.5
+  rotation_90_prob: 0.5
+  affine_rotation_limit: 15
+  zoom_limit: 0.1
+  brightness_contrast_prob: 0.3
+  brightness_limit: 0.1
+  contrast_limit: 0.1
+
+# Imbalance Handling
+imbalance:
+  strategy: "class_weighted"  # options: class_weighted, weighted_sampling, focal_loss
+  focal_gamma: 2.0
+  focal_alpha: 0.25
+
+# Training Hyperparameters
+training:
+  batch_size: 32
+  num_workers: 2
+  epochs: 25
+  learning_rate: 1.0e-4
+  min_lr: 1.0e-6
+  weight_decay: 1.0e-4
+  optimizer: "adamw"  # options: adamw, adam, sgd
+  scheduler: "cosine"  # options: cosine, plateau, step
+  patience: 7
+  monitor_metric: "val_all_sensitivity"  # or val_roc_auc
+  mixed_precision: false  # enable on CUDA devices
+
+# Models to Train
+models:
+  baseline_cnn:
+    name: "baseline_cnn"
+    num_classes: 2
+    dropout: 0.3
+  resnet50:
+    name: "resnet50"
+    num_classes: 2
+    pretrained: true
+    freeze_backbone_epochs: 3
+  efficientnet_b0:
+    name: "efficientnet_b0"
+    num_classes: 2
+    pretrained: true
+    freeze_backbone_epochs: 3
+  cnn_transformer:
+    name: "cnn_transformer"
+    num_classes: 2
+    backbone: "resnet18"
+    feature_dim: 256
+    num_heads: 4
+    num_layers: 2
+    dropout: 0.2
+
+# Evaluation & Threshold Strategy
+evaluation:
+  target_sensitivity: 0.95
+  default_threshold: 0.50
+  bootstrap_iterations: 1000
+  bootstrap_confidence: 0.95
+  uncertainty_band: 0.10  # [threshold - band, threshold + band] flagged as Low Confidence
+
+# Review States
+review_states:
+  all_detected: "ALL pattern detected"
+  hem_detected: "HEM/normal pattern detected"
+  low_confidence: "Low confidence: manual review required"
+  invalid_image: "Invalid image"
+
+# ONNX & Production Settings
+production:
+  model_type: "efficientnet_b0"  # or resnet50
+  onnx_export_path: "models/production.onnx"
+  opset_version: 17
+  input_name: "input_cell_image"
+  output_logits_name: "logits"
+  output_feature_map_name: "feature_maps"
+  max_request_size_mb: 4.5
+  max_image_dimension: 1024
+
+# Artifacts & Checkpoints Paths
+paths:
+  checkpoints_dir: "checkpoints"
+  artifacts_dir: "artifacts"
+  gradcam_dir: "artifacts/gradcam"
+  error_analysis_dir: "artifacts/error_analysis"
+  logs_dir: "logs"

@@ -1,0 +1,66 @@
+# Python & Bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+ENV/
+env.bak/
+venv.bak/
+
+# User Excluded Files (Papers, Presentations, Internal Plans, Notebook Scratchpads)
+*.pdf
+*.pptx
+*.ppt
+*.jpeg
+*.jpg
+WhatsApp Image*
+project_execution_plan.md
+PROGRESS.md
+PROJECT_BRIEF.md
+Untitled*.ipynb
+
+# Datasets & Caches (Large data files)
+data/
+checkpoints/
+*.parquet
+*.zip
+*.tar.gz
+*.csv
+
+# Training Checkpoints (PyTorch weights > 100MB except production ONNX model in models/)
+*.pt
+*.pth
+*.ckpt
+
+# Frontend / Node
+node_modules/
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+.npm
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# IDE & OS Files
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Test & Coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Logs & Temporary Files
+*.log
+artifacts/
+scratch/
