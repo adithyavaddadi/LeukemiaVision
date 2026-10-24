@@ -50,6 +50,19 @@ def test_api():
     assert resp_bad.status_code == 400, f"Expected 400 for bad image, got: {resp_bad.status_code}"
     print("   [PASS] Successfully rejected corrupted/non-image upload with 400.")
 
+    # 5. Predict Endpoint with uncropped whole-slide smear image
+    smear_path = os.path.join("data", "sample_slides", "allbloodsmear_650.jpg")
+    if os.path.exists(smear_path):
+        print("5. Testing POST /predict with uncropped whole-slide smear...")
+        with open(smear_path, "rb") as f_smear:
+            resp_smear = client.post("/predict", files={"file": ("smear.jpg", f_smear.read(), "image/jpeg")})
+        assert resp_smear.status_code == 200, f"Smear test failed: {resp_smear.text}"
+        data_smear = resp_smear.json()
+        assert data_smear.get("is_widefield_smear") is True, "Failed to identify wide-field smear"
+        assert len(data_smear.get("cells", [])) >= 2, "Failed to auto-segment cells from smear"
+        print(f"   [PASS] Whole smear auto-segmented: {data_smear.get('total_cells_detected')} cells detected ({data_smear.get('blasts_detected')} blasts, {data_smear.get('blast_index_pct')}% blast index).")
+        print(f"   [PASS] Generated annotated smear overlay: {bool(data_smear.get('annotated_smear_b64'))}")
+
     print("\n=== ALL FASTAPI BACKEND INTEGRATION TESTS PASSED ===")
 
 if __name__ == "__main__":

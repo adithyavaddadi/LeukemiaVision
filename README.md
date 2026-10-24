@@ -107,29 +107,50 @@ All models were evaluated using 5-Fold Stratified Group K-Fold cross-validation 
 ```
 .
 ├── api/                   # Vercel Serverless entrypoint (index.py)
+├── artifacts/             # Clinical evaluation plots & metrics (ROC, PR, Confusion, ECE)
 ├── backend/               # FastAPI backend application
 │   ├── app/
-│   │   ├── main.py        # FastAPI endpoints & CORS
-│   │   ├── model.py       # ONNX engine & Grad-CAM pipeline
-│   │   └── schemas.py     # Pydantic models & response formats
+│   │   ├── main.py        # FastAPI endpoints, real ONNX runtime & neural Grad-CAM
+│   │   └── schemas.py     # Pydantic schemas & response validation
+│   ├── Dockerfile         # Python 3.11 container definition
+│   ├── requirements.txt   # Backend dependencies
 │   └── test_backend.py    # Integration test suite
 ├── configs/               # Project configuration files (default.yaml)
+├── data/                  # ISBI C-NMC 2019 dataset
+│   ├── raw/images/        # ALL (malignant) & HEM (benign) partitioned cell images
+│   ├── sample_slides/     # Reference whole-slide marrow and peripheral smears
+│   ├── splits.csv         # 5-Fold Stratified Group K-Fold split metadata
+│   └── split_hash.json    # SHA-256 zero-leakage verification hash
 ├── docs/                  # Academic documentation & visual assets
-│   ├── assets/            # Application UI screenshots
+│   ├── assets/            # Architecture diagrams, DFDs, UML models, and UI screenshots
+│   ├── papers/            # Base paper and peer-reviewed literature references (PDF)
+│   ├── presentations/     # Project viva defense presentation slide decks (.pptx)
 │   ├── literature_review.md
-│   └── viva_questions.md
+│   ├── report_outline.md
+│   └── viva_questions.md  # 20-Question Viva Defense Guide
 ├── frontend/              # Vite + React glassmorphic web application
-│   ├── src/               # React components, styles, & assets
+│   ├── public/figures/    # Static benchmark evaluation figures
+│   ├── src/               # React components, clinical UI & print layout
+│   ├── Dockerfile         # Multi-stage Nginx container build
+│   ├── nginx.conf         # Alpine reverse proxy configuration
 │   ├── package.json
 │   └── vite.config.js
-├── models/                # Production ONNX model checkpoint (production.onnx)
-├── scripts/               # Cloud Colab training notebooks & utils
+├── models/                # Production & baseline ONNX models + classifier weights
+│   ├── production.onnx    # EfficientNet-B0 Dual-Head model (15.2 MB)
+│   ├── baseline_cnn.onnx  # 4-Block CNN Baseline model (1.49 MB)
+│   └── classifier_weights.npy
+├── scripts/               # Data engineering & pipeline automation
+│   ├── notebooks/         # Colab cloud training & exploratory notebooks
+│   ├── download_dataset.py
+│   ├── generate_all_visual_artifacts.py
+│   └── train_production_weights.py
+├── training/              # Model training, ONNX export & calibration modules
 ├── docker-compose.yml     # Multi-container local execution setup
-├── Dockerfile             # Container definition for backend
-├── vercel.json            # Vercel deployment metadata
+├── vercel.json            # Vercel serverless deployment configuration
 ├── RESULTS.md             # Detailed benchmark metrics report
 └── README.md              # Project documentation
 ```
+
 
 ---
 

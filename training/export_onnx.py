@@ -49,7 +49,7 @@ class DualHeadONNXWrapper(nn.Module):
             return logits, feat
         elif self.model_name == "baseline_cnn":
             feat = self.base_model.features(x)
-            pooled = self.base_model.pool(feat)
+            pooled = self.base_model.gap(feat)
             flattened = torch.flatten(pooled, 1)
             logits = self.base_model.classifier(flattened)
             return logits, feat
@@ -66,7 +66,12 @@ def export_to_onnx(model_name="efficientnet_b0", checkpoint_path=None, output_on
     base_model = build_model(model_name, num_classes=num_classes, pretrained=False)
     if checkpoint_path and os.path.exists(checkpoint_path):
         print(f"Loading weights from {checkpoint_path}...")
-        state_dict = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+        try:
+            state_dict = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+        except Exception:
+            state_dict = torch.load(checkpoint_path, map_location="cpu")
+        if isinstance(state_dict, dict) and "model_state_dict" in state_dict:
+            state_dict = state_dict["model_state_dict"]
         base_model.load_state_dict(state_dict)
     else:
         print("Exporting with initialized architecture weights (smoke/development mode).")

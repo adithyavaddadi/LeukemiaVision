@@ -18,145 +18,221 @@ import {
   Zap,
   Check,
   ChevronRight,
-  Printer
+  Printer,
+  Users,
+  Grid,
+  Eye,
+  AlertTriangle,
+  Info,
+  Filter,
+  ArrowUpDown,
+  CheckCircle,
+  XCircle,
+  Clock
 } from 'lucide-react';
 
 const API_BASE = '/api';
 
 export default function App() {
-  const [selectedFile, setSelectedFile] = useState(null);
-  const [previewUrl, setPreviewUrl] = useState(null);
+  const [activeTab, setActiveTab] = useState('screening'); // 'screening', 'staging', 'comparison'
+  
+  // File Selection State (Accepts 1 or multiple files seamlessly)
+  const [selectedFiles, setSelectedFiles] = useState([]);
+  const [previewUrls, setPreviewUrls] = useState([]);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
-  const [result, setResult] = useState(null);
   const [error, setError] = useState(null);
+
+  // Results State
+  const [singleResult, setSingleResult] = useState(null);
+  const [batchResult, setBatchResult] = useState(null);
+  const [activeBatchCell, setActiveBatchCell] = useState(null);
+
+  // Gallery Filter & Sorting in Multi-Cell Mode
+  const [cellFilter, setCellFilter] = useState('all'); // 'all', 'blasts', 'borderline', 'normal'
+  const [cellSort, setCellSort] = useState('default'); // 'default', 'malignancy_desc', 'nc_desc'
+
+  // Explainability Studio Controls
   const [overlayOpacity, setOverlayOpacity] = useState(0.55);
-  const [sampleCells, setSampleCells] = useState([]);
-  const [activeTab, setActiveTab] = useState('screening'); // 'screening', 'staging', 'comparison', 'defense'
+  const [saliencyViewMode, setSaliencyViewMode] = useState('3way'); // '3way', 'overlay', 'heatmap'
 
   const fileInputRef = useRef(null);
+  const inspectorRef = useRef(null);
 
-  useEffect(() => {
-    fetchSamples();
-  }, []);
-
-  const fetchSamples = async () => {
-    try {
-      const res = await fetch(`${API_BASE}/samples`);
-      if (res.ok) {
-        const data = await res.json();
-        setSampleCells(data.samples || []);
-      }
-    } catch {
-      console.log("Using static sample fallback");
-    }
-  };
-
-  const processAndSetFile = (file) => {
-    if (!file) return;
+  // --- File Selection Handlers ---
+  const handleFilesSelected = (fileList) => {
+    if (!fileList || fileList.length === 0) return;
     setError(null);
-    setResult(null);
+    setSingleResult(null);
+    setBatchResult(null);
+    setActiveBatchCell(null);
 
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      setSelectedFile(file);
-      setPreviewUrl(e.target.result);
-    };
-    reader.readAsDataURL(file);
+    const filesArray = Array.from(fileList);
+    setSelectedFiles(filesArray);
+
+    const urls = [];
+    let loadedCount = 0;
+    filesArray.forEach((file, idx) => {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        urls[idx] = e.target.result;
+        loadedCount++;
+        if (loadedCount === filesArray.length) {
+          setPreviewUrls([...urls]);
+        }
+      };
+      reader.readAsDataURL(file);
+    });
   };
 
+  // Client-side downscaling and compression helper (max 1024px, < 1MB)
+  const downscaleImageIfNeeded = (file, maxDim = 1024, quality = 0.9) => {
+    return new Promise((resolve) => {
+      if (!file.type || !file.type.startsWith('image/')) {
+        resolve(file);
+        return;
+      }
+      const img = new Image();
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        img.onload = () => {
+          let width = img.width;
+          let height = img.height;
+          if (width <= maxDim && height <= maxDim && file.size < 1024 * 1024) {
+            resolve(file);
+            return;
+          }
+          if (width > height) {
+            if (width > maxDim) {
+              height = Math.round((height * maxDim) / width);
+              width = maxDim;
+            }
+          } else {
+            if (height > maxDim) {
+              width = Math.round((width * maxDim) / height);
+              height = maxDim;
+            }
+          }
+          const canvas = document.createElement('canvas');
+          canvas.width = width;
+          canvas.height = height;
+          const ctx = canvas.getContext('2d');
+          ctx.drawImage(img, 0, 0, width, height);
+          canvas.toBlob((blob) => {
+            if (blob) {
+              const downscaledFile = new File([blob], file.name.replace(/\.[^/.]+$/, "") + ".jpg", {
+                type: 'image/jpeg',
+                lastModified: Date.now()
+              });
+              resolve(downscaledFile);
+            } else {
+              resolve(file);
+            }
+          }, 'image/jpeg', quality);
+        };
+        img.src = e.target.result;
+      };
+      reader.readAsDataURL(file);
+    });
+  };
+
+  // --- Run Unified Analysis ---
   const handleAnalyze = async () => {
-    if (!selectedFile) return;
+    if (selectedFiles.length === 0) return;
     setIsAnalyzing(true);
     setError(null);
 
-    const formData = new FormData();
-    formData.append('file', selectedFile);
-
     try {
-      const res = await fetch(`${API_BASE}/predict`, {
-        method: 'POST',
-        body: formData,
-      });
+      // Client-side downscale and sanitize files to stay under Vercel 4.5MB request limit
+      const processedFiles = await Promise.all(selectedFiles.map(f => downscaleImageIfNeeded(f)));
 
-      if (!res.ok) {
-        throw new Error(`Server returned error ${res.status}`);
-      }
+      if (processedFiles.length === 1) {
+        // Single Cell Analysis
+        const formData = new FormData();
+        formData.append('file', processedFiles[0]);
 
-      const data = await res.json();
-      setResult(data);
-    } catch (err) {
-      console.warn("Falling back to high-accuracy local simulation:", err);
-      // Fallback response with FAB Staging and 96%+ accuracy
-      const isALL = selectedFile.name.toLowerCase().includes('all') || selectedFile.name.toLowerCase().includes('cancer');
-      const allProb = isALL ? 0.968 : 0.042;
-      setTimeout(() => {
-        setResult({
-          review_state: isALL ? "ALL pattern detected" : "HEM / Normal cell pattern",
-          predicted_class: isALL ? "ALL (Malignant Blast)" : "HEM (Benign Normal)",
-          confidence_level: isALL ? "High Confidence Malignant" : "High Confidence Benign",
-          alert_type: isALL ? "danger" : "success",
-          probabilities: { ALL_malignant: allProb, HEM_benign: roundTo(1.0 - allProb, 4) },
-          accuracy_summary: {
-            model_tested_accuracy: "96.8% (Vs Base Paper 90.7%)",
-            training_accuracy: "98.4%",
-            validation_accuracy: "95.8%"
-          },
-          fab_staging: {
-            stage: isALL ? "ALL Stage L1 (Homogeneous Micro-Lymphoblastic)" : "HEM (Benign / Normal Cell)",
-            subclassification: isALL ? "Small, uniform blasts with regular nuclear contour and high N:C ratio" : "Normal Mature Lymphocyte",
-            clinical_significance: isALL ? "Positive lymphoblast morphology consistent with ALL Stage L1." : "Negative for malignant lymphoblasts.",
-            risk_tier: isALL ? "Standard Risk (Favorable Pediatric Response)" : "Standard / Non-Malignant",
-            stage_probabilities: isALL ? { ALL_L1_Early: 0.812, ALL_L2_Advanced: 0.125, ALL_L3_Burkitt: 0.031, HEM_Benign: 0.032 } : { HEM_Benign: 0.958, ALL_L1_Early: 0.026, ALL_L2_Advanced: 0.012, ALL_L3_Burkitt: 0.004 }
-          },
-          morphology_metrics: {
-            nc_ratio: isALL ? 0.88 : 0.54,
-            chromatin_density: isALL ? 186.4 : 124.0,
-            nuclear_regularity: isALL ? 0.86 : 0.92,
-            cell_diameter_um: isALL ? 15.4 : 11.2
-          },
-          explainability: {
-            method: "Closed-Form Grad-CAM Class Activation Saliency",
-            heatmap_b64: previewUrl,
-            overlay_b64: previewUrl
-          },
-          inference_latency_ms: 27.8,
-          clinical_compliance: "Clinical Decision Support Prototype • Validated on ISBI C-NMC 2019 Cohort • Dept of AI & ML"
+        const res = await fetch(`${API_BASE}/predict`, {
+          method: 'POST',
+          body: formData,
         });
-        setIsAnalyzing(false);
-      }, 400);
+
+        if (!res.ok) throw new Error(`Server returned error ${res.status}`);
+        const data = await res.json();
+        if (data.is_widefield_smear) {
+          setBatchResult(data);
+          setSingleResult(null);
+          if (data.cells && data.cells.length > 0) {
+            setActiveBatchCell(data.cells[0]);
+          }
+        } else {
+          setSingleResult(data);
+          setBatchResult(null);
+          setActiveBatchCell(null);
+        }
+      } else {
+        // Multi-Cell Slide Batch Analysis
+        const formData = new FormData();
+        processedFiles.forEach((file) => {
+          formData.append('files', file);
+        });
+
+        const res = await fetch(`${API_BASE}/predict-batch`, {
+          method: 'POST',
+          body: formData,
+        });
+
+        if (!res.ok) throw new Error(`Server returned error ${res.status}`);
+        const data = await res.json();
+        setBatchResult(data);
+        setSingleResult(null);
+        if (data.cells && data.cells.length > 0) {
+          setActiveBatchCell(data.cells[0]);
+        }
+      }
+    } catch (err) {
+      console.warn("Analysis request failed:", err);
+      setError("Analysis failed. Please verify that the backend server is running and try again.");
     } finally {
       setIsAnalyzing(false);
     }
   };
 
-  const loadSampleDirectly = (sample) => {
-    setError(null);
-    setResult(null);
-    setPreviewUrl(sample.preview);
-    
-    // Create File object from base64
-    const byteString = atob(sample.preview.split(',')[1]);
-    const mimeString = sample.preview.split(',')[0].split(':')[1].split(';')[0];
-    const ab = new ArrayBuffer(byteString.length);
-    const ia = new Uint8Array(ab);
-    for (let i = 0; i < byteString.length; i++) {
-      ia[i] = byteString.charCodeAt(i);
-    }
-    const blob = new Blob([ab], { type: mimeString });
-    const file = new File([blob], sample.id, { type: mimeString });
-    setSelectedFile(file);
-  };
+  // Helper for determining current active cell details
+  const currentCellDetails = singleResult || activeBatchCell;
+  const currentPreviewUrl = singleResult 
+    ? previewUrls[0] 
+    : (activeBatchCell?.thumbnail_b64 || previewUrls[0]);
 
-  const roundTo = (num, decimals) => {
-    return Math.round(num * Math.pow(10, decimals)) / Math.pow(10, decimals);
+  // Filter and sort cells for the batch population gallery
+  const getFilteredAndSortedCells = () => {
+    if (!batchResult?.cells) return [];
+    
+    let list = [...batchResult.cells];
+
+    // Filter
+    if (cellFilter === 'blasts') {
+      list = list.filter(c => c.probabilities.ALL_malignant >= 0.60);
+    } else if (cellFilter === 'borderline') {
+      list = list.filter(c => c.probabilities.ALL_malignant > 0.38 && c.probabilities.ALL_malignant < 0.60);
+    } else if (cellFilter === 'normal') {
+      list = list.filter(c => c.probabilities.ALL_malignant <= 0.38);
+    }
+
+    // Sort
+    if (cellSort === 'malignancy_desc') {
+      list.sort((a, b) => b.probabilities.ALL_malignant - a.probabilities.ALL_malignant);
+    } else if (cellSort === 'nc_desc') {
+      list.sort((a, b) => (b.morphology_metrics?.nc_ratio || 0) - (a.morphology_metrics?.nc_ratio || 0));
+    }
+
+    return list;
   };
 
   return (
-    <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column', background: '#050a12', color: '#f8fafc' }}>
+    <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column', background: '#050a12', color: '#f8fafc', fontFamily: 'Inter, system-ui, sans-serif' }}>
       
       {/* Top Clinical Precision Header */}
       <header style={{
-        background: 'rgba(9, 14, 26, 0.92)',
+        background: 'rgba(9, 14, 26, 0.95)',
         backdropFilter: 'blur(16px)',
         borderBottom: '1px solid rgba(255, 255, 255, 0.08)',
         padding: '16px 32px',
@@ -182,20 +258,20 @@ export default function App() {
           </div>
           <div>
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-              <h1 style={{ fontSize: '20px', fontWeight: 800, letterSpacing: '-0.02em', background: 'linear-gradient(90deg, #ffffff, #93c5fd)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>
+              <h1 style={{ fontSize: '20px', fontWeight: 800, letterSpacing: '-0.02em', background: 'linear-gradient(90deg, #ffffff, #93c5fd)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent', margin: 0 }}>
                 LeukemiaVision Pro
               </h1>
               <span style={{ fontSize: '11px', fontWeight: 700, color: '#38bdf8', padding: '2px 8px', background: 'rgba(56, 189, 248, 0.12)', borderRadius: '6px', border: '1px solid rgba(56, 189, 248, 0.25)' }}>
-                FAB STAGING + Grad-CAM
+                CLINICAL AI WORKSTATION
               </span>
             </div>
-            <p style={{ fontSize: '12px', color: '#94a3b8' }}>
+            <p style={{ fontSize: '12px', color: '#94a3b8', margin: 0 }}>
               Department of AI & ML • Supervisor: <strong>Mr. Balika Mahesh</strong> • ISBI C-NMC 2019
             </p>
           </div>
         </div>
 
-        {/* Global Performance Matrix Badges */}
+        {/* Global Benchmark Badges */}
         <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
           <div style={{ background: 'rgba(15, 23, 42, 0.7)', border: '1px solid rgba(255, 255, 255, 0.08)', padding: '6px 14px', borderRadius: '10px', fontSize: '12px' }}>
             <span style={{ color: '#64748b', display: 'block', fontSize: '10px', textTransform: 'uppercase', fontWeight: 600 }}>Our Model Acc</span>
@@ -219,15 +295,17 @@ export default function App() {
               background: activeTab === 'screening' ? 'linear-gradient(135deg, #0284c7, #4f46e5)' : 'transparent',
               color: '#ffffff',
               border: 'none',
-              padding: '8px 16px',
+              padding: '8px 18px',
               borderRadius: '8px',
               fontSize: '13px',
               fontWeight: 600,
               cursor: 'pointer',
-              transition: 'all 0.2s ease'
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px'
             }}
           >
-            Clinical Screening
+            <Microscope size={15} /> Clinical Screening & Analysis
           </button>
           <button 
             onClick={() => setActiveTab('staging')}
@@ -239,8 +317,7 @@ export default function App() {
               borderRadius: '8px',
               fontSize: '13px',
               fontWeight: 600,
-              cursor: 'pointer',
-              transition: 'all 0.2s ease'
+              cursor: 'pointer'
             }}
           >
             FAB Staging Matrix
@@ -255,8 +332,7 @@ export default function App() {
               borderRadius: '8px',
               fontSize: '13px',
               fontWeight: 600,
-              cursor: 'pointer',
-              transition: 'all 0.2s ease'
+              cursor: 'pointer'
             }}
           >
             Base Paper Comparison
@@ -264,235 +340,514 @@ export default function App() {
         </div>
       </header>
 
-      {/* Main Container */}
-      <main style={{ flex: 1, padding: '24px 32px', maxWidth: '1500px', margin: '0 auto', width: '100%' }}>
-        
+      {/* Main Workspace Area */}
+      <main style={{ flex: 1, padding: '24px 32px', maxWidth: '1680px', margin: '0 auto', width: '100%', boxSizing: 'border-box' }}>
+
+
+        {error && (
+          <div style={{ background: 'rgba(239, 68, 68, 0.15)', border: '1px solid rgba(239, 68, 68, 0.4)', borderRadius: '10px', padding: '12px 18px', marginBottom: '20px', display: 'flex', alignItems: 'center', gap: '10px', color: '#fca5a5' }}>
+            <AlertTriangle size={18} />
+            <span style={{ fontSize: '13px' }}>{error}</span>
+          </div>
+        )}
+
+        {/* ========================================================
+            TAB 1: UNIFIED CLINICAL SCREENING & WORKSTATION
+           ======================================================== */}
         {activeTab === 'screening' && (
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1.35fr', gap: '28px' }}>
+          <div style={{ display: 'grid', gridTemplateColumns: '360px 1fr', gap: '28px', alignItems: 'start' }}>
             
-            {/* Left Column: Microscope Smear Input & Real Benchmark Gallery */}
-            <div className="glass-panel" style={{ padding: '24px' }}>
+            {/* Left Column: Clean, Streamlined Ingestion Engine */}
+            <div className="glass-panel" style={{ padding: '24px', background: 'rgba(15, 23, 42, 0.85)', borderRadius: '14px', border: '1px solid rgba(255, 255, 255, 0.08)' }}>
+              
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '16px' }}>
-                <h2 style={{ fontSize: '16px', fontWeight: 700, display: 'flex', alignItems: 'center', gap: '8px' }}>
-                  <Upload size={18} color="#38bdf8" /> Blood Smear Cell Acquisition
+                <h2 style={{ fontSize: '16px', fontWeight: 700, display: 'flex', alignItems: 'center', gap: '8px', margin: 0 }}>
+                  <Upload size={18} color="#38bdf8" /> Smear Ingestion Station
                 </h2>
-                <span style={{ fontSize: '11px', color: '#64748b' }}>C-NMC 2019 • 450x450 BMP Standard</span>
+                <span style={{ fontSize: '11px', color: '#38bdf8', fontWeight: 600 }}>C-NMC 2019 Format</span>
               </div>
 
-              {/* Real Microscopic Cell Smear Gallery (1-Click) */}
-              <div style={{ marginBottom: '18px' }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
-                  <span style={{ fontSize: '12px', fontWeight: 600, color: '#94a3b8' }}>
-                    Quick Select Real Patient Microscopic Cells:
-                  </span>
-                  <span style={{ fontSize: '11px', color: '#38bdf8' }}>Actual C-NMC 2019 Cohort</span>
-                </div>
-
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '10px' }}>
-                  {sampleCells.length > 0 ? (
-                    sampleCells.map((sample, idx) => (
-                      <div 
-                        key={idx}
-                        onClick={() => loadSampleDirectly(sample)}
-                        style={{
-                          background: 'rgba(15, 23, 42, 0.8)',
-                          border: selectedFile?.name === sample.id ? '2px solid #38bdf8' : '1px solid rgba(255, 255, 255, 0.1)',
-                          borderRadius: '10px',
-                          padding: '8px',
-                          cursor: 'pointer',
-                          textAlign: 'center',
-                          transition: 'all 0.2s ease'
-                        }}
-                      >
-                        <img 
-                          src={sample.preview} 
-                          alt={sample.id} 
-                          style={{ width: '100%', height: '54px', objectFit: 'contain', borderRadius: '6px', background: '#000', marginBottom: '4px' }} 
-                        />
-                        <span style={{
-                          fontSize: '10px',
-                          fontWeight: 700,
-                          padding: '2px 6px',
-                          borderRadius: '4px',
-                          background: sample.type === 'ALL' ? 'rgba(244, 63, 94, 0.2)' : 'rgba(16, 185, 129, 0.2)',
-                          color: sample.type === 'ALL' ? '#f43f5e' : '#10b981',
-                          display: 'block'
-                        }}>
-                          {sample.type === 'ALL' ? 'ALL Blast' : 'HEM Benign'}
-                        </span>
-                      </div>
-                    ))
-                  ) : (
-                    // Default interactive fallback sample buttons
-                    <>
-                      <div 
-                        onClick={() => {
-                          const file = new File([new Blob()], "UID_1_1_1_all.bmp", { type: "image/bmp" });
-                          setSelectedFile(file);
-                          setPreviewUrl("https://images.unsplash.com/photo-1579154204601-01588f351e67?w=450&auto=format&fit=crop&q=80");
-                        }}
-                        style={{ background: 'rgba(15, 23, 42, 0.8)', border: '1px solid rgba(244, 63, 94, 0.3)', borderRadius: '10px', padding: '10px', cursor: 'pointer', textAlign: 'center' }}
-                      >
-                        <span style={{ color: '#f43f5e', fontSize: '11px', fontWeight: 700 }}>ALL Sample 1</span>
-                      </div>
-                      <div 
-                        onClick={() => {
-                          const file = new File([new Blob()], "UID_H10_1_1_hem.bmp", { type: "image/bmp" });
-                          setSelectedFile(file);
-                          setPreviewUrl("https://images.unsplash.com/photo-1576086213369-97a306d36557?w=450&auto=format&fit=crop&q=80");
-                        }}
-                        style={{ background: 'rgba(15, 23, 42, 0.8)', border: '1px solid rgba(16, 185, 129, 0.3)', borderRadius: '10px', padding: '10px', cursor: 'pointer', textAlign: 'center' }}
-                      >
-                        <span style={{ color: '#10b981', fontSize: '11px', fontWeight: 700 }}>HEM Sample 1</span>
-                      </div>
-                    </>
-                  )}
-                </div>
-              </div>
-
-              {/* Upload Dropzone */}
+              {/* Expansive, Modern Drag & Drop Zone */}
               <div 
-                className="dropzone"
                 onClick={() => fileInputRef.current?.click()}
-                style={{ marginBottom: '18px' }}
+                style={{
+                  border: '2px dashed rgba(56, 189, 248, 0.4)',
+                  borderRadius: '12px',
+                  padding: '36px 20px',
+                  textAlign: 'center',
+                  background: 'rgba(15, 23, 42, 0.5)',
+                  cursor: 'pointer',
+                  marginBottom: '16px',
+                  transition: 'all 0.2s ease'
+                }}
               >
                 <input 
                   type="file" 
                   ref={fileInputRef} 
+                  multiple 
                   style={{ display: 'none' }} 
                   accept="image/bmp,image/png,image/jpeg" 
-                  onChange={(e) => e.target.files?.[0] && processAndSetFile(e.target.files[0])}
+                  onChange={(e) => handleFilesSelected(e.target.files)}
                 />
-                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '8px' }}>
-                  <Layers size={28} color="#38bdf8" />
-                  <p style={{ fontSize: '14px', fontWeight: 600 }}>Upload Microscopic Blood Smear Cell</p>
-                  <p style={{ fontSize: '11px', color: '#64748b' }}>
-                    Aspect-safe resizing to 224x224 • Preserves Nuclear-to-Cytoplasm ratio
-                  </p>
+                <div style={{ width: '52px', height: '52px', borderRadius: '50%', background: 'rgba(56, 189, 248, 0.1)', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 12px auto' }}>
+                  <Layers size={26} color="#38bdf8" />
                 </div>
+                <p style={{ fontSize: '14px', fontWeight: 700, margin: '0 0 6px 0' }}>
+                  Drop Single Cell or Multi-Cell Batch
+                </p>
+                <p style={{ fontSize: '12px', color: '#94a3b8', margin: '0 0 8px 0' }}>
+                  Select 1 image for individual cytometry, or select 5 to 50 images for slide-level screening
+                </p>
+                <span style={{ fontSize: '11px', color: '#64748b', display: 'block' }}>
+                  Supported formats: BMP, PNG, JPEG
+                </span>
               </div>
 
-              {/* Preview Box */}
-              {previewUrl && (
-                <div style={{
-                  background: 'rgba(0, 0, 0, 0.35)',
-                  border: '1px solid rgba(255, 255, 255, 0.1)',
-                  borderRadius: '12px',
-                  padding: '12px',
-                  marginBottom: '18px',
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: '14px'
-                }}>
-                  <img 
-                    src={previewUrl} 
-                    alt="Smear preview" 
-                    style={{ width: '70px', height: '70px', objectFit: 'contain', borderRadius: '8px', background: '#000', border: '1px solid rgba(255,255,255,0.1)' }} 
-                  />
-                  <div style={{ flex: 1 }}>
-                    <p style={{ fontSize: '13px', fontWeight: 700 }}>{selectedFile?.name || 'Selected Cell Smear'}</p>
-                    <p style={{ fontSize: '11px', color: '#94a3b8' }}>
-                      Single-cell region ready for ONNX multi-head inference
-                    </p>
+              {/* Loaded Selection Status & Thumbnail Strip */}
+              {selectedFiles.length > 0 && (
+                <div style={{ background: 'rgba(0, 0, 0, 0.45)', border: '1px solid rgba(255, 255, 255, 0.1)', borderRadius: '10px', padding: '12px', marginBottom: '16px' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
+                    <span style={{ fontSize: '12px', fontWeight: 700, color: '#38bdf8' }}>
+                      {selectedFiles.length === 1 ? '1 Cell Loaded' : `${selectedFiles.length} Smear Cells Selected`}
+                    </span>
+                    <button 
+                      onClick={() => { setSelectedFiles([]); setPreviewUrls([]); setSingleResult(null); setBatchResult(null); }}
+                      style={{ background: 'none', border: 'none', color: '#f87171', fontSize: '11px', fontWeight: 600, cursor: 'pointer' }}
+                    >
+                      Clear Selection
+                    </button>
+                  </div>
+
+                  {/* Horizontal Thumbnail Carousel Strip */}
+                  <div style={{ display: 'flex', gap: '8px', overflowX: 'auto', paddingBottom: '6px' }}>
+                    {previewUrls.map((url, idx) => (
+                      <img 
+                        key={idx}
+                        src={url} 
+                        alt={`Cell ${idx}`} 
+                        style={{ width: '46px', height: '46px', objectFit: 'contain', borderRadius: '6px', background: '#000', border: '1px solid rgba(255,255,255,0.1)', flexShrink: 0 }} 
+                      />
+                    ))}
                   </div>
                 </div>
               )}
 
-              {/* Primary Screening Action */}
+              {/* Primary Action Button */}
               <button 
                 onClick={handleAnalyze} 
-                disabled={!selectedFile || isAnalyzing}
-                className="btn-primary"
-                style={{ width: '100%', padding: '14px', fontSize: '15px' }}
+                disabled={selectedFiles.length === 0 || isAnalyzing}
+                style={{
+                  width: '100%',
+                  padding: '14px',
+                  fontSize: '14px',
+                  fontWeight: 700,
+                  borderRadius: '10px',
+                  background: isAnalyzing ? 'rgba(56, 189, 248, 0.4)' : 'linear-gradient(135deg, #0284c7, #4f46e5)',
+                  color: '#ffffff',
+                  border: 'none',
+                  cursor: isAnalyzing || selectedFiles.length === 0 ? 'not-allowed' : 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: '8px',
+                  boxShadow: '0 4px 14px rgba(2, 132, 199, 0.35)',
+                  marginBottom: '16px'
+                }}
               >
                 {isAnalyzing ? (
                   <>
-                    <RefreshCw size={18} className="animate-spin" />
-                    Running Multi-Head Deep Inference (~28ms)...
+                    <RefreshCw size={16} className="animate-spin" />
+                    Running Neural Inference on {selectedFiles.length} Cell(s)...
                   </>
                 ) : (
                   <>
-                    <Zap size={18} />
-                    Run Leukemia Detection & FAB Staging
+                    <Zap size={16} />
+                    {selectedFiles.length <= 1 
+                      ? 'Analyze Single Cell & Grad-CAM' 
+                      : `Run Slide Screening (${selectedFiles.length} Cells)`
+                    }
                   </>
                 )}
               </button>
+
+              {(singleResult || batchResult) && (
+                <button
+                  type="button"
+                  onClick={() => window.print()}
+                  style={{
+                    width: '100%',
+                    padding: '10px',
+                    fontSize: '12px',
+                    fontWeight: 700,
+                    borderRadius: '8px',
+                    background: 'rgba(16, 185, 129, 0.15)',
+                    border: '1px solid rgba(16, 185, 129, 0.4)',
+                    color: '#34d399',
+                    cursor: 'pointer',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    gap: '6px',
+                    marginBottom: '16px'
+                  }}
+                >
+                  <Printer size={15} /> Print / Export Clinical Diagnostic Report
+                </button>
+              )}
+
+              {/* Clinical Protocol & System Specs */}
+              <div style={{ background: 'rgba(15, 23, 42, 0.6)', border: '1px solid rgba(255,255,255,0.06)', borderRadius: '10px', padding: '14px', fontSize: '11px', color: '#94a3b8', lineHeight: 1.6 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '6px', color: '#38bdf8', fontWeight: 700, marginBottom: '6px' }}>
+                  <ShieldCheck size={14} /> Clinical Validation Standard
+                </div>
+                <p style={{ margin: '0 0 6px 0' }}>
+                  • <strong>Model:</strong> EfficientNet-B0 + Hybrid Transformer
+                </p>
+                <p style={{ margin: '0 0 6px 0' }}>
+                  • <strong>Cohort:</strong> 10,661 Cells • 73 Patients (ISBI 2019)
+                </p>
+                <p style={{ margin: '0 0 6px 0' }}>
+                  • <strong>Zero Subject Leakage:</strong> 5-Fold Group Stratified
+                </p>
+                <p style={{ margin: 0 }}>
+                  • <strong>WHO Leukemia Cutoff:</strong> &ge; 20% Peripheral Blasts
+                </p>
+              </div>
+
             </div>
 
-            {/* Right Column: Multi-Head Staging & Morphological Results */}
+            {/* Right Column: Master Diagnostic & Saliency Station */}
             <div>
-              {result ? (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
+              {/* ========================================================
+                  SECTION A: BATCH (MULTIPLE CELLS) SUMMARY
+                 ======================================================== */}
+              {batchResult && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '20px', marginBottom: '24px' }}>
                   
-                  {/* Diagnosis & Staging Card */}
-                  <div className="glass-panel-glow" style={{ padding: '24px' }}>
-                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '12px' }}>
+                  {/* Executive Slide Diagnostic Verdict Card */}
+                  <div style={{
+                    padding: '24px',
+                    borderRadius: '14px',
+                    background: batchResult.slide_alert === 'danger' 
+                      ? 'linear-gradient(135deg, rgba(244, 63, 94, 0.22), rgba(15, 23, 42, 0.95))' 
+                      : batchResult.slide_alert === 'warning'
+                      ? 'linear-gradient(135deg, rgba(251, 191, 36, 0.22), rgba(15, 23, 42, 0.95))'
+                      : 'linear-gradient(135deg, rgba(16, 185, 129, 0.22), rgba(15, 23, 42, 0.95))',
+                    border: batchResult.slide_alert === 'danger' ? '1px solid rgba(244, 63, 94, 0.4)' : '1px solid rgba(16, 185, 129, 0.4)'
+                  }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '14px' }}>
                       <div>
                         <span style={{ fontSize: '11px', textTransform: 'uppercase', letterSpacing: '0.05em', color: '#94a3b8', fontWeight: 600 }}>
-                          Primary Detection & FAB Staging
+                          Peripheral Blood Smear Slide Assessment
                         </span>
                         <h3 style={{
                           fontSize: '22px',
                           fontWeight: 800,
-                          color: result.alert_type === 'danger' ? '#f43f5e' : '#10b981'
+                          margin: '4px 0',
+                          color: batchResult.slide_alert === 'danger' ? '#f43f5e' : batchResult.slide_alert === 'warning' ? '#fbbf24' : '#10b981'
                         }}>
-                          {result.fab_staging.stage}
+                          {batchResult.slide_verdict}
+                        </h3>
+                        <p style={{ fontSize: '13px', color: '#cbd5e1', margin: '4px 0 0 0', lineHeight: 1.5 }}>
+                          {batchResult.clinical_recommendation}
+                        </p>
+                      </div>
+
+                      {/* Blast Index Gauge */}
+                      <div style={{ textAlign: 'right', background: 'rgba(0,0,0,0.4)', padding: '12px 18px', borderRadius: '10px', border: '1px solid rgba(255,255,255,0.08)', flexShrink: 0 }}>
+                        <span style={{ fontSize: '10px', color: '#94a3b8', textTransform: 'uppercase', display: 'block' }}>Slide Blast Index</span>
+                        <strong style={{ fontSize: '26px', color: batchResult.slide_alert === 'danger' ? '#f43f5e' : '#10b981' }}>
+                          {batchResult.batch_metadata.blast_index_pct}%
+                        </strong>
+                        <span style={{ fontSize: '10px', color: '#64748b', display: 'block' }}>WHO Leukemia Cutoff: &ge; 20%</span>
+                      </div>
+                    </div>
+
+                    {/* Progress Bar of Blast Ratio */}
+                    <div style={{ marginBottom: '16px' }}>
+                      <div style={{ height: '8px', background: 'rgba(255,255,255,0.08)', borderRadius: '4px', overflow: 'hidden', position: 'relative' }}>
+                        <div style={{
+                          width: `${Math.min(100, batchResult.batch_metadata.blast_index_pct)}%`,
+                          height: '100%',
+                          background: batchResult.slide_alert === 'danger' ? 'linear-gradient(90deg, #f43f5e, #fb7185)' : 'linear-gradient(90deg, #34d399, #10b981)',
+                          transition: 'width 0.6s ease'
+                        }} />
+                        {/* 20% Cutoff Marker */}
+                        <div style={{ position: 'absolute', top: 0, left: '20%', width: '2px', height: '100%', background: '#f59e0b', boxShadow: '0 0 4px #f59e0b' }} />
+                      </div>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '10px', color: '#64748b', marginTop: '4px' }}>
+                        <span>0%</span>
+                        <span style={{ color: '#f59e0b', fontWeight: 600 }}>20% (WHO Cutoff)</span>
+                        <span>100%</span>
+                      </div>
+                    </div>
+
+                    {/* 5 Clinical Metric Counters */}
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: '10px' }}>
+                      <div style={{ background: 'rgba(0,0,0,0.3)', padding: '10px', borderRadius: '8px', textAlign: 'center' }}>
+                        <span style={{ fontSize: '11px', color: '#94a3b8', display: 'block' }}>Total Evaluated</span>
+                        <strong style={{ fontSize: '16px' }}>{batchResult.batch_metadata.total_cells_analyzed} Cells</strong>
+                      </div>
+                      <div style={{ background: 'rgba(244, 63, 94, 0.12)', padding: '10px', borderRadius: '8px', textAlign: 'center', border: '1px solid rgba(244, 63, 94, 0.25)' }}>
+                        <span style={{ fontSize: '11px', color: '#fda4af', display: 'block' }}>Malignant Blasts</span>
+                        <strong style={{ fontSize: '16px', color: '#f43f5e' }}>{batchResult.batch_metadata.blasts_detected}</strong>
+                      </div>
+                      <div style={{ background: 'rgba(16, 185, 129, 0.12)', padding: '10px', borderRadius: '8px', textAlign: 'center', border: '1px solid rgba(16, 185, 129, 0.25)' }}>
+                        <span style={{ fontSize: '11px', color: '#6ee7b7', display: 'block' }}>Normal Leukocytes</span>
+                        <strong style={{ fontSize: '16px', color: '#10b981' }}>{batchResult.batch_metadata.normal_cells_detected}</strong>
+                      </div>
+                      <div style={{ background: 'rgba(251, 191, 36, 0.12)', padding: '10px', borderRadius: '8px', textAlign: 'center', border: '1px solid rgba(251, 191, 36, 0.25)' }}>
+                        <span style={{ fontSize: '11px', color: '#fcd34d', display: 'block' }}>Borderline / Review</span>
+                        <strong style={{ fontSize: '16px', color: '#fbbf24' }}>{batchResult.batch_metadata.indeterminate_cells}</strong>
+                      </div>
+                      <div style={{ background: 'rgba(0,0,0,0.3)', padding: '10px', borderRadius: '8px', textAlign: 'center' }}>
+                        <span style={{ fontSize: '11px', color: '#94a3b8', display: 'block' }}>Screening Latency</span>
+                        <strong style={{ fontSize: '16px', color: '#38bdf8' }}>{batchResult.total_inference_latency_ms} ms</strong>
+                      </div>
+                    </div>
+
+                    {/* Population FAB Subtype Spectrum Bar */}
+                    {batchResult.batch_metadata.fab_distribution && (
+                      <div style={{ marginTop: '14px', background: 'rgba(0,0,0,0.35)', padding: '10px 14px', borderRadius: '8px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: '11px' }}>
+                        <span style={{ color: '#94a3b8', fontWeight: 600 }}>Population FAB Subtypes:</span>
+                        <div style={{ display: 'flex', gap: '16px' }}>
+                          <span style={{ color: '#fda4af' }}>L1 Blasts: <strong>{batchResult.batch_metadata.fab_distribution.ALL_L1}</strong></span>
+                          <span style={{ color: '#f43f5e' }}>L2 Blasts: <strong>{batchResult.batch_metadata.fab_distribution.ALL_L2}</strong></span>
+                          <span style={{ color: '#c084fc' }}>L3 Blasts: <strong>{batchResult.batch_metadata.fab_distribution.ALL_L3}</strong></span>
+                          <span style={{ color: '#6ee7b7' }}>Normal: <strong>{batchResult.batch_metadata.fab_distribution.HEM_Benign}</strong></span>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Whole-Slide Smear Auto-Segmentation Map (When uncropped smear uploaded) */}
+                  {batchResult.annotated_smear_b64 && (
+                    <div className="glass-panel" style={{ padding: '20px', borderRadius: '14px', border: '1px solid rgba(56, 189, 248, 0.3)' }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                          <Layers size={16} color="#38bdf8" />
+                          <h4 style={{ fontSize: '14px', fontWeight: 700, margin: 0 }}>
+                            Whole-Slide Peripheral Smear Automated Detection Map
+                          </h4>
+                          <span style={{ fontSize: '11px', color: '#94a3b8' }}>• {batchResult.cells.length} Leukocytes Detected</span>
+                        </div>
+                        <div style={{ display: 'flex', gap: '14px', fontSize: '11px' }}>
+                          <span style={{ display: 'flex', alignItems: 'center', gap: '4px', color: '#f43f5e', fontWeight: 600 }}>
+                            <span style={{ width: '10px', height: '10px', borderRadius: '2px', background: '#ef4444' }} /> Malignant Blast
+                          </span>
+                          <span style={{ display: 'flex', alignItems: 'center', gap: '4px', color: '#10b981', fontWeight: 600 }}>
+                            <span style={{ width: '10px', height: '10px', borderRadius: '2px', background: '#10b981' }} /> Benign Leukocyte
+                          </span>
+                        </div>
+                      </div>
+                      <div style={{ borderRadius: '10px', overflow: 'hidden', border: '1px solid rgba(255,255,255,0.08)', background: '#050914', display: 'flex', justifyContent: 'center' }}>
+                        <img 
+                          src={batchResult.annotated_smear_b64} 
+                          alt="Annotated Whole-Slide Smear" 
+                          style={{ maxWidth: '100%', maxHeight: '440px', objectFit: 'contain' }}
+                        />
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Interactive Cell Population Gallery with Filtering */}
+                  <div className="glass-panel" style={{ padding: '20px', background: 'rgba(15, 23, 42, 0.85)', borderRadius: '14px', border: '1px solid rgba(255, 255, 255, 0.08)' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '14px', flexWrap: 'wrap', gap: '10px' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                        <Grid size={16} color="#38bdf8" />
+                        <h4 style={{ fontSize: '14px', fontWeight: 700, margin: 0 }}>
+                          Cell Population Gallery ({batchResult.cells.length} Cells)
+                        </h4>
+                        <span style={{ fontSize: '11px', color: '#94a3b8' }}>• Click any cell to inspect below</span>
+                      </div>
+
+                      {/* Filter & Sorting Chips */}
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '4px', background: 'rgba(0,0,0,0.4)', padding: '3px', borderRadius: '8px' }}>
+                          <button 
+                            onClick={() => setCellFilter('all')}
+                            style={{
+                              background: cellFilter === 'all' ? '#0284c7' : 'transparent',
+                              color: '#fff', border: 'none', padding: '4px 10px', borderRadius: '6px', fontSize: '11px', cursor: 'pointer'
+                            }}
+                          >
+                            All ({batchResult.cells.length})
+                          </button>
+                          <button 
+                            onClick={() => setCellFilter('blasts')}
+                            style={{
+                              background: cellFilter === 'blasts' ? '#f43f5e' : 'transparent',
+                              color: '#fff', border: 'none', padding: '4px 10px', borderRadius: '6px', fontSize: '11px', cursor: 'pointer'
+                            }}
+                          >
+                            Blasts ({batchResult.batch_metadata.blasts_detected})
+                          </button>
+                          <button 
+                            onClick={() => setCellFilter('borderline')}
+                            style={{
+                              background: cellFilter === 'borderline' ? '#f59e0b' : 'transparent',
+                              color: '#fff', border: 'none', padding: '4px 10px', borderRadius: '6px', fontSize: '11px', cursor: 'pointer'
+                            }}
+                          >
+                            Borderline ({batchResult.batch_metadata.indeterminate_cells})
+                          </button>
+                          <button 
+                            onClick={() => setCellFilter('normal')}
+                            style={{
+                              background: cellFilter === 'normal' ? '#10b981' : 'transparent',
+                              color: '#fff', border: 'none', padding: '4px 10px', borderRadius: '6px', fontSize: '11px', cursor: 'pointer'
+                            }}
+                          >
+                            Normal ({batchResult.batch_metadata.normal_cells_detected})
+                          </button>
+                        </div>
+
+                        {/* Sort Selector */}
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '4px', background: 'rgba(0,0,0,0.4)', padding: '4px 8px', borderRadius: '8px', fontSize: '11px', color: '#94a3b8' }}>
+                          <ArrowUpDown size={12} />
+                          <select 
+                            value={cellSort} 
+                            onChange={(e) => setCellSort(e.target.value)}
+                            style={{ background: 'transparent', color: '#fff', border: 'none', fontSize: '11px', outline: 'none', cursor: 'pointer' }}
+                          >
+                            <option value="default" style={{ background: '#0f172a' }}>Sequence</option>
+                            <option value="malignancy_desc" style={{ background: '#0f172a' }}>Malignancy Risk</option>
+                            <option value="nc_desc" style={{ background: '#0f172a' }}>N:C Ratio</option>
+                          </select>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Scrollable Cell Population Filmstrip Grid */}
+                    <div style={{
+                      display: 'grid',
+                      gridTemplateColumns: 'repeat(auto-fill, minmax(105px, 1fr))',
+                      gap: '10px',
+                      maxHeight: '260px',
+                      overflowY: 'auto',
+                      padding: '4px'
+                    }}>
+                      {getFilteredAndSortedCells().map((cell, idx) => {
+                        const isMalignant = cell.probabilities.ALL_malignant >= 0.60;
+                        const isBorderline = cell.probabilities.ALL_malignant > 0.38 && cell.probabilities.ALL_malignant < 0.60;
+                        const isSelected = activeBatchCell?.filename === cell.filename;
+                        
+                        return (
+                          <div 
+                            key={idx}
+                            onClick={() => {
+                              setActiveBatchCell(cell);
+                              inspectorRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+                            }}
+                            style={{
+                              background: isSelected ? 'rgba(56, 189, 248, 0.18)' : 'rgba(15, 23, 42, 0.8)',
+                              border: isSelected 
+                                ? '2px solid #38bdf8' 
+                                : isMalignant 
+                                ? '1px solid rgba(244, 63, 94, 0.4)' 
+                                : isBorderline
+                                ? '1px solid rgba(251, 191, 36, 0.4)'
+                                : '1px solid rgba(16, 185, 129, 0.3)',
+                              borderRadius: '8px',
+                              padding: '6px',
+                              cursor: 'pointer',
+                              textAlign: 'center',
+                              boxShadow: isSelected ? '0 0 14px rgba(56, 189, 248, 0.55)' : 'none',
+                              transform: isSelected ? 'scale(1.04)' : 'scale(1)',
+                              transition: 'all 0.15s ease'
+                            }}
+                          >
+                            <img 
+                              src={cell.thumbnail_b64} 
+                              alt={cell.filename} 
+                              style={{ width: '100%', height: '62px', objectFit: 'contain', borderRadius: '4px', background: '#000', marginBottom: '4px' }}
+                            />
+                            <span style={{
+                              fontSize: '10px',
+                              fontWeight: 700,
+                              padding: '1px 4px',
+                              borderRadius: '4px',
+                              background: isMalignant ? 'rgba(244, 63, 94, 0.2)' : isBorderline ? 'rgba(251, 191, 36, 0.2)' : 'rgba(16, 185, 129, 0.2)',
+                              color: isMalignant ? '#f43f5e' : isBorderline ? '#fbbf24' : '#10b981',
+                              display: 'block',
+                              marginBottom: '2px'
+                            }}>
+                              {isMalignant 
+                                ? `${cell.fab_staging?.stage?.includes('L1') ? 'L1' : cell.fab_staging?.stage?.includes('L3') ? 'L3' : 'L2'} • ${(cell.probabilities.ALL_malignant * 100).toFixed(1)}%` 
+                                : `Normal • ${(cell.probabilities.HEM_benign * 100).toFixed(1)}%`
+                              }
+                            </span>
+                            <span style={{ fontSize: '9px', color: '#94a3b8', display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                              {cell.filename.replace('.bmp', '')}
+                            </span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                </div>
+              )}
+
+              {/* ========================================================
+                  SECTION B: ACTIVE CELL DEEP INSPECTOR & 3-WAY GRAD-CAM
+                 ======================================================== */}
+              {currentCellDetails ? (
+                <div ref={inspectorRef} style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
+                  
+                  {/* Active Cell Cytological Assessment Card */}
+                  <div className="glass-panel-glow" style={{ padding: '24px', background: 'rgba(15, 23, 42, 0.85)', borderRadius: '14px', border: '1px solid rgba(56, 189, 248, 0.2)' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '12px' }}>
+                      <div>
+                        <span style={{ fontSize: '11px', textTransform: 'uppercase', letterSpacing: '0.05em', color: '#94a3b8', fontWeight: 600 }}>
+                          {batchResult ? `Detailed Cytometry for: ${currentCellDetails.filename}` : 'Single-Cell Screening & Morphology'}
+                        </span>
+                        <h3 style={{
+                          fontSize: '22px',
+                          fontWeight: 800,
+                          margin: '4px 0 0 0',
+                          color: currentCellDetails.alert_type === 'danger' ? '#f43f5e' : currentCellDetails.alert_type === 'warning' ? '#fbbf24' : '#10b981'
+                        }}>
+                          {currentCellDetails.fab_staging.stage}
                         </h3>
                       </div>
-                      <span className={`badge-${result.alert_type === 'danger' ? 'all' : 'hem'}`} style={{ padding: '6px 14px', borderRadius: '20px', fontSize: '12px', fontWeight: 700 }}>
-                        {result.confidence_level}
+                      <span style={{
+                        padding: '6px 14px',
+                        borderRadius: '20px',
+                        fontSize: '12px',
+                        fontWeight: 700,
+                        background: currentCellDetails.alert_type === 'danger' ? 'rgba(244, 63, 94, 0.15)' : currentCellDetails.alert_type === 'warning' ? 'rgba(251, 191, 36, 0.15)' : 'rgba(16, 185, 129, 0.15)',
+                        color: currentCellDetails.alert_type === 'danger' ? '#f43f5e' : currentCellDetails.alert_type === 'warning' ? '#fbbf24' : '#10b981',
+                        border: '1px solid currentColor'
+                      }}>
+                        {currentCellDetails.confidence_level}
                       </span>
                     </div>
 
                     <p style={{ fontSize: '13px', color: '#cbd5e1', marginBottom: '16px', lineHeight: 1.5 }}>
-                      <strong>Cytological Assessment:</strong> {result.fab_staging.subclassification}. 
+                      <strong>Cytological Assessment:</strong> {currentCellDetails.fab_staging.subclassification}.
                       <span style={{ display: 'block', color: '#38bdf8', marginTop: '4px', fontWeight: 600 }}>
-                        Risk Classification: {result.fab_staging.risk_tier}
+                        Clinical Risk: {currentCellDetails.fab_staging.risk_tier}
                       </span>
                     </p>
 
-                    {/* Probability Progress Breakdown */}
+                    {/* Continuous Calibrated Probability Bar */}
                     <div style={{ marginBottom: '16px' }}>
                       <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '13px', fontWeight: 700, marginBottom: '6px' }}>
-                        <span>Malignant ALL Confidence: {(result.probabilities.ALL_malignant * 100).toFixed(1)}%</span>
-                        <span style={{ color: '#94a3b8' }}>Benign HEM: {(result.probabilities.HEM_benign * 100).toFixed(1)}%</span>
+                        <span style={{ color: '#fda4af' }}>Malignant ALL Confidence: {(currentCellDetails.probabilities.ALL_malignant * 100).toFixed(1)}%</span>
+                        <span style={{ color: '#6ee7b7' }}>Benign HEM: {(currentCellDetails.probabilities.HEM_benign * 100).toFixed(1)}%</span>
                       </div>
                       <div style={{ height: '10px', background: 'rgba(255,255,255,0.1)', borderRadius: '5px', overflow: 'hidden', display: 'flex' }}>
                         <div style={{
-                          width: `${result.probabilities.ALL_malignant * 100}%`,
+                          width: `${currentCellDetails.probabilities.ALL_malignant * 100}%`,
                           background: 'linear-gradient(90deg, #f43f5e, #fb7185)',
                           transition: 'width 0.5s ease'
                         }} />
                         <div style={{
-                          width: `${result.probabilities.HEM_benign * 100}%`,
+                          width: `${currentCellDetails.probabilities.HEM_benign * 100}%`,
                           background: 'linear-gradient(90deg, #34d399, #10b981)',
                           transition: 'width 0.5s ease'
                         }} />
-                      </div>
-                    </div>
-
-                    {/* FAB Staging Probability Distribution */}
-                    <div style={{ background: 'rgba(0,0,0,0.3)', padding: '12px 16px', borderRadius: '10px', marginBottom: '14px' }}>
-                      <span style={{ fontSize: '11px', color: '#94a3b8', display: 'block', marginBottom: '8px', fontWeight: 600 }}>
-                        FAB Subtype Probability Spectrum:
-                      </span>
-                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '8px', textAlign: 'center', fontSize: '11px' }}>
-                        <div style={{ background: 'rgba(244, 63, 94, 0.1)', padding: '6px', borderRadius: '6px', border: '1px solid rgba(244, 63, 94, 0.2)' }}>
-                          <span style={{ color: '#fda4af', display: 'block' }}>L1 (Small)</span>
-                          <strong style={{ fontSize: '13px' }}>{((result.fab_staging.stage_probabilities.ALL_L1_Early || 0) * 100).toFixed(1)}%</strong>
-                        </div>
-                        <div style={{ background: 'rgba(244, 63, 94, 0.1)', padding: '6px', borderRadius: '6px', border: '1px solid rgba(244, 63, 94, 0.2)' }}>
-                          <span style={{ color: '#fda4af', display: 'block' }}>L2 (Pleomorphic)</span>
-                          <strong style={{ fontSize: '13px' }}>{((result.fab_staging.stage_probabilities.ALL_L2_Advanced || 0) * 100).toFixed(1)}%</strong>
-                        </div>
-                        <div style={{ background: 'rgba(244, 63, 94, 0.1)', padding: '6px', borderRadius: '6px', border: '1px solid rgba(244, 63, 94, 0.2)' }}>
-                          <span style={{ color: '#fda4af', display: 'block' }}>L3 (Burkitt)</span>
-                          <strong style={{ fontSize: '13px' }}>{((result.fab_staging.stage_probabilities.ALL_L3_Burkitt || 0) * 100).toFixed(1)}%</strong>
-                        </div>
-                        <div style={{ background: 'rgba(16, 185, 129, 0.1)', padding: '6px', borderRadius: '6px', border: '1px solid rgba(16, 185, 129, 0.2)' }}>
-                          <span style={{ color: '#6ee7b7', display: 'block' }}>Normal HEM</span>
-                          <strong style={{ fontSize: '13px' }}>{((result.fab_staging.stage_probabilities.HEM_Benign || 0) * 100).toFixed(1)}%</strong>
-                        </div>
                       </div>
                     </div>
 
@@ -500,66 +855,124 @@ export default function App() {
                     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '8px', background: 'rgba(15, 23, 42, 0.6)', padding: '12px', borderRadius: '10px', fontSize: '11px' }}>
                       <div>
                         <span style={{ color: '#94a3b8', display: 'block' }}>N:C Ratio</span>
-                        <strong style={{ color: '#38bdf8', fontSize: '13px' }}>{result.morphology_metrics.nc_ratio}</strong>
+                        <strong style={{ color: '#38bdf8', fontSize: '13px' }}>{currentCellDetails.morphology_metrics.nc_ratio}</strong>
                       </div>
                       <div>
                         <span style={{ color: '#94a3b8', display: 'block' }}>Chromatin Density</span>
-                        <strong style={{ color: '#a78bfa', fontSize: '13px' }}>{result.morphology_metrics.chromatin_density}</strong>
+                        <strong style={{ color: '#a78bfa', fontSize: '13px' }}>{currentCellDetails.morphology_metrics.chromatin_density}</strong>
                       </div>
                       <div>
-                        <span style={{ color: '#94a3b8', display: 'block' }}>Contour Regularity</span>
-                        <strong style={{ color: '#34d399', fontSize: '13px' }}>{result.morphology_metrics.nuclear_regularity}</strong>
+                        <span style={{ color: '#94a3b8', display: 'block' }}>Regularity</span>
+                        <strong style={{ color: '#34d399', fontSize: '13px' }}>{currentCellDetails.morphology_metrics.nuclear_regularity}</strong>
                       </div>
                       <div>
-                        <span style={{ color: '#94a3b8', display: 'block' }}>Latency</span>
-                        <strong style={{ color: '#fbbf24', fontSize: '13px' }}>{result.inference_latency_ms} ms</strong>
+                        <span style={{ color: '#94a3b8', display: 'block' }}>Cell Diameter</span>
+                        <strong style={{ color: '#fbbf24', fontSize: '13px' }}>{currentCellDetails.morphology_metrics.cell_diameter_um} &mu;m</strong>
                       </div>
                     </div>
                   </div>
 
-                  {/* Explainable Grad-CAM Heatmap Section */}
-                  <div className="glass-panel" style={{ padding: '24px' }}>
-                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '14px' }}>
-                      <h4 style={{ fontSize: '15px', fontWeight: 700, display: 'flex', alignItems: 'center', gap: '8px' }}>
-                        <Sliders size={16} color="#38bdf8" /> Morphological Grad-CAM Saliency
-                      </h4>
+                  {/* ========================================================
+                      CRYSTAL-CLEAR 3-WAY GRAD-CAM SALIENCY STUDIO
+                     ======================================================== */}
+                  <div className="glass-panel" style={{ padding: '24px', background: 'rgba(15, 23, 42, 0.85)', borderRadius: '14px', border: '1px solid rgba(255, 255, 255, 0.08)' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '14px', flexWrap: 'wrap', gap: '10px' }}>
+                      <div>
+                        <h4 style={{ fontSize: '15px', fontWeight: 700, display: 'flex', alignItems: 'center', gap: '8px', margin: 0 }}>
+                          <Sliders size={16} color="#38bdf8" /> Explainable Morphological Grad-CAM Heatmap
+                        </h4>
+                        <span style={{ fontSize: '11px', color: '#94a3b8' }}>
+                          Transparent neural activation mapping directly onto nuclear chromatin & blast membrane
+                        </span>
+                      </div>
                       
-                      {/* Interactive Opacity Slider */}
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                        <span style={{ fontSize: '12px', color: '#94a3b8' }}>Blend:</span>
-                        <input 
-                          type="range" 
-                          min="0" 
-                          max="1" 
-                          step="0.05" 
-                          value={overlayOpacity}
-                          onChange={(e) => setOverlayOpacity(parseFloat(e.target.value))}
-                          style={{ accentColor: '#38bdf8', width: '90px' }}
-                        />
-                        <span style={{ fontSize: '12px', fontWeight: 700, width: '30px' }}>{Math.round(overlayOpacity * 100)}%</span>
+                      {/* View Switcher: 3-Way vs Overlay vs Pure Heatmap */}
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '6px', background: 'rgba(0,0,0,0.4)', padding: '3px', borderRadius: '8px' }}>
+                        <button 
+                          onClick={() => setSaliencyViewMode('3way')}
+                          style={{
+                            background: saliencyViewMode === '3way' ? '#0284c7' : 'transparent',
+                            color: '#fff', border: 'none', padding: '4px 10px', borderRadius: '6px', fontSize: '11px', cursor: 'pointer'
+                          }}
+                        >
+                          3-Way View
+                        </button>
+                        <button 
+                          onClick={() => setSaliencyViewMode('overlay')}
+                          style={{
+                            background: saliencyViewMode === 'overlay' ? '#0284c7' : 'transparent',
+                            color: '#fff', border: 'none', padding: '4px 10px', borderRadius: '6px', fontSize: '11px', cursor: 'pointer'
+                          }}
+                        >
+                          Blended Overlay
+                        </button>
+                        <button 
+                          onClick={() => setSaliencyViewMode('heatmap')}
+                          style={{
+                            background: saliencyViewMode === 'heatmap' ? '#0284c7' : 'transparent',
+                            color: '#fff', border: 'none', padding: '4px 10px', borderRadius: '6px', fontSize: '11px', cursor: 'pointer'
+                          }}
+                        >
+                          Pure Saliency
+                        </button>
                       </div>
                     </div>
 
-                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
-                      <div style={{ textAlign: 'center' }}>
-                        <span style={{ fontSize: '11px', color: '#64748b', display: 'block', marginBottom: '6px' }}>Microscope Blood Smear</span>
-                        <img 
-                          src={previewUrl} 
-                          alt="Smear" 
-                          style={{ width: '100%', height: '190px', objectFit: 'contain', borderRadius: '8px', background: '#000', border: '1px solid rgba(255,255,255,0.08)' }} 
-                        />
-                      </div>
-                      <div style={{ textAlign: 'center', position: 'relative' }}>
-                        <span style={{ fontSize: '11px', color: '#64748b', display: 'block', marginBottom: '6px' }}>Grad-CAM Activation Blend</span>
-                        <div style={{ position: 'relative', width: '100%', height: '190px', borderRadius: '8px', overflow: 'hidden', background: '#000', border: '1px solid rgba(255,255,255,0.08)' }}>
+                    {/* Saliency Display Area */}
+                    {saliencyViewMode === '3way' && (
+                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '14px', marginBottom: '14px' }}>
+                        {/* 1. Raw Microscopic Cell */}
+                        <div style={{ textAlign: 'center', background: 'rgba(0,0,0,0.5)', padding: '10px', borderRadius: '10px', border: '1px solid rgba(255,255,255,0.06)' }}>
+                          <span style={{ fontSize: '11px', fontWeight: 600, color: '#94a3b8', display: 'block', marginBottom: '6px' }}>
+                            1. Original Stained Smear
+                          </span>
                           <img 
-                            src={previewUrl} 
+                            src={currentPreviewUrl} 
+                            alt="Raw Cell" 
+                            style={{ width: '100%', height: '160px', objectFit: 'contain', borderRadius: '6px', background: '#000' }} 
+                          />
+                          <span style={{ fontSize: '10px', color: '#64748b', display: 'block', marginTop: '4px' }}>Leishman Staining</span>
+                        </div>
+
+                        {/* 2. Isolated Glowing Heatmap */}
+                        <div style={{ textAlign: 'center', background: 'rgba(0,0,0,0.5)', padding: '10px', borderRadius: '10px', border: '1px solid rgba(56, 189, 248, 0.25)' }}>
+                          <span style={{ fontSize: '11px', fontWeight: 600, color: '#38bdf8', display: 'block', marginBottom: '6px' }}>
+                            2. Isolated Heatmap (Turbo)
+                          </span>
+                          <img 
+                            src={currentCellDetails.explainability.heatmap_b64} 
+                            alt="Grad-CAM Saliency" 
+                            style={{ width: '100%', height: '160px', objectFit: 'contain', borderRadius: '6px', background: '#050a12' }} 
+                          />
+                          <span style={{ fontSize: '10px', color: '#38bdf8', display: 'block', marginTop: '4px' }}>Neural Attention Map</span>
+                        </div>
+
+                        {/* 3. Blended Overlay */}
+                        <div style={{ textAlign: 'center', background: 'rgba(0,0,0,0.5)', padding: '10px', borderRadius: '10px', border: '1px solid rgba(16, 185, 129, 0.25)' }}>
+                          <span style={{ fontSize: '11px', fontWeight: 600, color: '#34d399', display: 'block', marginBottom: '6px' }}>
+                            3. Diagnostic Alignment
+                          </span>
+                          <img 
+                            src={currentCellDetails.explainability.overlay_b64} 
+                            alt="Blended Overlay" 
+                            style={{ width: '100%', height: '160px', objectFit: 'contain', borderRadius: '6px', background: '#000' }} 
+                          />
+                          <span style={{ fontSize: '10px', color: '#34d399', display: 'block', marginTop: '4px' }}>Morphological Overlay</span>
+                        </div>
+                      </div>
+                    )}
+
+                    {saliencyViewMode === 'overlay' && (
+                      <div style={{ textAlign: 'center', marginBottom: '14px' }}>
+                        <div style={{ position: 'relative', width: '100%', height: '260px', borderRadius: '10px', overflow: 'hidden', background: '#000', border: '1px solid rgba(255,255,255,0.1)' }}>
+                          <img 
+                            src={currentPreviewUrl} 
                             alt="Base" 
                             style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', objectFit: 'contain' }} 
                           />
                           <img 
-                            src={result.explainability.heatmap_b64} 
-                            alt="Heatmap" 
+                            src={currentCellDetails.explainability.heatmap_b64} 
+                            alt="Heatmap overlay" 
                             style={{ 
                               position: 'absolute', 
                               top: 0, 
@@ -567,24 +980,66 @@ export default function App() {
                               width: '100%', 
                               height: '100%', 
                               objectFit: 'contain',
-                              opacity: overlayOpacity,
-                              mixBlendMode: 'screen'
+                              opacity: overlayOpacity
                             }} 
                           />
                         </div>
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '12px', marginTop: '10px' }}>
+                          <span style={{ fontSize: '12px', color: '#94a3b8' }}>Heatmap Transparency:</span>
+                          <input 
+                            type="range" 
+                            min="0.1" 
+                            max="1.0" 
+                            step="0.05" 
+                            value={overlayOpacity}
+                            onChange={(e) => setOverlayOpacity(parseFloat(e.target.value))}
+                            style={{ accentColor: '#38bdf8', width: '150px' }}
+                          />
+                          <span style={{ fontSize: '12px', fontWeight: 700, width: '35px' }}>{Math.round(overlayOpacity * 100)}%</span>
+                        </div>
                       </div>
+                    )}
+
+                    {saliencyViewMode === 'heatmap' && (
+                      <div style={{ textAlign: 'center', marginBottom: '14px' }}>
+                        <img 
+                          src={currentCellDetails.explainability.heatmap_b64} 
+                          alt="Isolated Saliency" 
+                          style={{ width: '100%', height: '260px', objectFit: 'contain', borderRadius: '10px', background: '#050a12', border: '1px solid rgba(56, 189, 248, 0.3)' }} 
+                        />
+                      </div>
+                    )}
+
+                    {/* Saliency Interpretation Banner */}
+                    <div style={{ background: 'rgba(56, 189, 248, 0.08)', border: '1px solid rgba(56, 189, 248, 0.25)', borderRadius: '10px', padding: '12px 16px' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '6px' }}>
+                        <span style={{ fontSize: '12px', fontWeight: 700, color: '#38bdf8' }}>
+                          Clinical Explainability Interpretation:
+                        </span>
+                        {/* Jet Colorbar Reference */}
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '10px', color: '#94a3b8' }}>
+                          <span>Normal / Background</span>
+                          <div style={{ width: '90px', height: '8px', borderRadius: '4px', background: 'linear-gradient(90deg, #1e3a8a, #06b6d4, #eab308, #dc2626)' }} />
+                          <span style={{ color: '#f87171', fontWeight: 700 }}>Blast Hotspot</span>
+                        </div>
+                      </div>
+                      <p style={{ fontSize: '12px', color: '#cbd5e1', lineHeight: 1.5, margin: 0 }}>
+                        {currentCellDetails.explainability.focus_summary}
+                      </p>
                     </div>
+
                   </div>
 
                 </div>
               ) : (
-                <div className="glass-panel" style={{ padding: '60px 30px', textAlign: 'center', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', minHeight: '440px' }}>
-                  <div style={{ width: '64px', height: '64px', borderRadius: '50%', background: 'rgba(56, 189, 248, 0.1)', display: 'flex', alignItems: 'center', justifyContent: 'center', marginBottom: '16px' }}>
-                    <Microscope size={32} color="#38bdf8" />
+                /* Empty state when no analysis has run yet */
+                <div className="glass-panel" style={{ padding: '70px 30px', textAlign: 'center', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', minHeight: '480px', background: 'rgba(15, 23, 42, 0.6)' }}>
+                  <div style={{ width: '68px', height: '68px', borderRadius: '50%', background: 'rgba(56, 189, 248, 0.1)', display: 'flex', alignItems: 'center', justifyContent: 'center', marginBottom: '18px' }}>
+                    <Microscope size={34} color="#38bdf8" />
                   </div>
-                  <h3 style={{ fontSize: '18px', fontWeight: 700, marginBottom: '6px' }}>Awaiting Smear Cell Crop</h3>
-                  <p style={{ fontSize: '13px', color: '#94a3b8', maxWidth: '380px', lineHeight: 1.6 }}>
-                    Select a benchmark cell above or upload an image to view real-time leukemia detection, FAB staging (L1, L2, L3), and Grad-CAM saliency.
+                  <h3 style={{ fontSize: '19px', fontWeight: 700, marginBottom: '6px' }}>Awaiting Microscopic Smear Input</h3>
+                  <p style={{ fontSize: '13px', color: '#94a3b8', maxWidth: '440px', lineHeight: 1.6, margin: 0 }}>
+                    Select or drag-and-drop cell images on the left. The system will automatically run deep cytometry, FAB subtyping, and 3-way Grad-CAM heatmaps on this unified dashboard.
                   </p>
                 </div>
               )}
@@ -593,7 +1048,9 @@ export default function App() {
           </div>
         )}
 
-        {/* Tab 2: FAB Staging Reference Matrix */}
+        {/* ========================================================
+            TAB 2: FAB STAGING REFERENCE MATRIX
+           ======================================================== */}
         {activeTab === 'staging' && (
           <div className="glass-panel" style={{ padding: '32px' }}>
             <h2 style={{ fontSize: '20px', fontWeight: 800, marginBottom: '8px' }}>
@@ -643,7 +1100,9 @@ export default function App() {
           </div>
         )}
 
-        {/* Tab 3: Head-to-Head Base Paper Comparison */}
+        {/* ========================================================
+            TAB 3: HEAD-TO-HEAD BASE PAPER COMPARISON
+           ======================================================== */}
         {activeTab === 'comparison' && (
           <div className="glass-panel" style={{ padding: '32px' }}>
             <h2 style={{ fontSize: '20px', fontWeight: 800, marginBottom: '8px' }}>
@@ -671,7 +1130,7 @@ export default function App() {
                     <td style={{ padding: '14px', color: '#10b981', fontWeight: 600 }}>+6.1% Higher Accuracy</td>
                   </tr>
                   <tr style={{ borderBottom: '1px solid rgba(255, 255, 255, 0.05)' }}>
-                    <td style={{ padding: '14px', fontWeight: 600 }}>Training & Test Dataset Size</td>
+                    <td style={{ padding: '14px', fontWeight: 600 }}>Dataset Size & Curation</td>
                     <td style={{ padding: '14px' }}>~3,200 images</td>
                     <td style={{ padding: '14px', fontWeight: 600 }}>10,661 images (Full C-NMC 2019 Cohort)</td>
                     <td style={{ padding: '14px', color: '#10b981' }}>3.3x Larger Sample Size</td>
@@ -683,6 +1142,12 @@ export default function App() {
                     <td style={{ padding: '14px', color: '#10b981' }}>Clinically Valid Generalization</td>
                   </tr>
                   <tr style={{ borderBottom: '1px solid rgba(255, 255, 255, 0.05)' }}>
+                    <td style={{ padding: '14px', fontWeight: 600 }}>Unified Single & Slide Batch Testing</td>
+                    <td style={{ padding: '14px', color: '#94a3b8' }}>Single isolated cells only</td>
+                    <td style={{ padding: '14px', color: '#38bdf8', fontWeight: 600 }}>Unified Single & Multi-Cell Batch on 1 Dashboard</td>
+                    <td style={{ padding: '14px', color: '#10b981' }}>Slide-Level WHO Blast Index</td>
+                  </tr>
+                  <tr style={{ borderBottom: '1px solid rgba(255, 255, 255, 0.05)' }}>
                     <td style={{ padding: '14px', fontWeight: 600 }}>FAB Subtype Staging</td>
                     <td style={{ padding: '14px', color: '#94a3b8' }}>Binary ALL vs HEM only</td>
                     <td style={{ padding: '14px', color: '#38bdf8', fontWeight: 600 }}>Multi-Stage (L1, L2, L3 Staging)</td>
@@ -691,8 +1156,8 @@ export default function App() {
                   <tr style={{ borderBottom: '1px solid rgba(255, 255, 255, 0.05)' }}>
                     <td style={{ padding: '14px', fontWeight: 600 }}>Explainability & Saliency</td>
                     <td style={{ padding: '14px', color: '#94a3b8' }}>None (Black Box)</td>
-                    <td style={{ padding: '14px', fontWeight: 600 }}>Closed-Form Pure NumPy Grad-CAM</td>
-                    <td style={{ padding: '14px', color: '#10b981' }}>Real-Time Cytological Heatmap</td>
+                    <td style={{ padding: '14px', fontWeight: 600 }}>3-Way High-Contrast Grad-CAM Heatmap</td>
+                    <td style={{ padding: '14px', color: '#10b981' }}>Visual Nuclear Cytometry</td>
                   </tr>
                   <tr>
                     <td style={{ padding: '14px', fontWeight: 600 }}>Inference Latency on CPU</td>
@@ -705,9 +1170,10 @@ export default function App() {
             </div>
           </div>
         )}
+
       </main>
 
-      {/* Sleek Minimalist Medical Compliance Footer */}
+      {/* Sleek Medical Compliance Footer */}
       <footer style={{
         background: 'rgba(9, 14, 26, 0.95)',
         borderTop: '1px solid rgba(255, 255, 255, 0.08)',

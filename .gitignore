@@ -16,12 +16,10 @@ venv.bak/
 *.pptx
 *.ppt
 *.jpeg
-*.jpg
 WhatsApp Image*
 project_execution_plan.md
 PROGRESS.md
 PROJECT_BRIEF.md
-Untitled*.ipynb
 
 # Datasets & Caches (Large data files)
 data/

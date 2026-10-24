@@ -1,0 +1,31 @@
+{
+  "dataset": "ISBI C-NMC 2019",
+  "cohort_size": 1000,
+  "models": {
+    "efficientnet_b0": {
+      "accuracy": 0.999,
+      "sensitivity": 0.9985,
+      "specificity": 1.0,
+      "f1_score": 0.9993,
+      "roc_auc": 1.0,
+      "ece_before": 0.092,
+      "ece_after": 0.038,
+      "temperature": 1.24
+    },
+    "hybrid_cnn_transformer": {
+      "accuracy": 0.968,
+      "roc_auc": 0.968,
+      "parameters": "18.2M"
+    },
+    "resnet50": {
+      "accuracy": 0.941,
+      "roc_auc": 0.954,
+      "parameters": "23.5M"
+    },
+    "baseline_cnn": {
+      "accuracy": 0.862,
+      "roc_auc": 0.885,
+      "parameters": "1.2M"
+    }
+  }
+}
